@@ -1080,6 +1080,9 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
         wtx.m_it_wtxOrdered = wtxOrdered.insert(std::make_pair(wtx.nOrderPos, &wtx));
         wtx.nTimeSmart = ComputeTimeSmart(wtx, rescanning_old_block);
         AddToSpends(wtx, &batch);
+
+        // Update birth time when tx time is older than it.
+        MaybeUpdateBirthTime(wtx.GetTxTime());
     }
 
     if (!fInsertedNew)
@@ -1199,6 +1202,10 @@ bool CWallet::LoadToWallet(const uint256& hash, const UpdateWalletTxFn& fill_wtx
             }
         }
     }
+
+    // Update birth time when tx time is older than it.
+    MaybeUpdateBirthTime(wtx.GetTxTime());
+
     return true;
 }
 
@@ -1747,11 +1754,11 @@ bool CWallet::ImportScriptPubKeys(const std::string& label, const std::set<CScri
     return true;
 }
 
-void CWallet::FirstKeyTimeChanged(const ScriptPubKeyMan* spkm, int64_t new_birth_time)
+void CWallet::MaybeUpdateBirthTime(int64_t time)
 {
     int64_t birthtime = m_birth_time.load();
-    if (new_birth_time < birthtime) {
-        m_birth_time = new_birth_time;
+    if (time < birthtime) {
+        m_birth_time = time;
     }
 }
 
@@ -2292,6 +2299,8 @@ DBErrors CWallet::LoadWallet()
 {
     LOCK(cs_wallet);
 
+    Assert(m_spk_managers.empty());
+    Assert(m_wallet_flags == 0);
     DBErrors nLoadWalletRet = WalletBatch(GetDatabase()).LoadWallet(this);
     if (nLoadWalletRet == DBErrors::NEED_REWRITE)
     {
@@ -3087,9 +3096,10 @@ std::shared_ptr<CWallet> CWallet::Create(WalletContext& context, const std::stri
         int64_t time = spk_man->GetTimeFirstKey();
         if (!time_first_key || time < *time_first_key) time_first_key = time;
     }
-    if (time_first_key) walletInstance->m_birth_time = *time_first_key;
+    if (time_first_key) walletInstance->MaybeUpdateBirthTime(*time_first_key);
 
     if (chain && !AttachChain(walletInstance, *chain, rescan_required, error, warnings)) {
+        walletInstance->m_chain_notifications_handler.reset(); // Reset this pointer so that the wallet will actually be unloaded
         return nullptr;
     }
 
@@ -3480,10 +3490,12 @@ LegacyScriptPubKeyMan* CWallet::GetOrCreateLegacyScriptPubKeyMan()
 
 void CWallet::AddScriptPubKeyMan(const uint256& id, std::unique_ptr<ScriptPubKeyMan> spkm_man)
 {
+    // Add spkm_man to m_spk_managers before calling any method
+    // that might access it.
     const auto& spkm = m_spk_managers[id] = std::move(spkm_man);
 
     // Update birth time if needed
-    FirstKeyTimeChanged(spkm.get(), spkm->GetTimeFirstKey());
+    MaybeUpdateBirthTime(spkm->GetTimeFirstKey());
 }
 
 void CWallet::SetupLegacyScriptPubKeyMan()
@@ -3516,7 +3528,7 @@ void CWallet::ConnectScriptPubKeyManNotifiers()
     for (const auto& spk_man : GetActiveScriptPubKeyMans()) {
         spk_man->NotifyWatchonlyChanged.connect(NotifyWatchonlyChanged);
         spk_man->NotifyCanGetAddressesChanged.connect(NotifyCanGetAddressesChanged);
-        spk_man->NotifyFirstKeyTimeChanged.connect(std::bind(&CWallet::FirstKeyTimeChanged, this, std::placeholders::_1, std::placeholders::_2));
+        spk_man->NotifyFirstKeyTimeChanged.connect(std::bind(&CWallet::MaybeUpdateBirthTime, this, std::placeholders::_2));
     }
 }
 
@@ -3535,6 +3547,10 @@ void CWallet::SetupDescriptorScriptPubKeyMans(const CExtKey& master_key)
 {
     AssertLockHeld(cs_wallet);
 
+    // Create single batch txn
+    WalletBatch batch(GetDatabase());
+    if (!batch.TxnBegin()) throw std::runtime_error("Error: cannot create db transaction for descriptors setup");
+
     for (bool internal : {false, true}) {
         for (OutputType t : OUTPUT_TYPES) {
             auto spk_manager = std::unique_ptr<DescriptorScriptPubKeyMan>(new DescriptorScriptPubKeyMan(*this, m_keypool_size));
@@ -3542,16 +3558,19 @@ void CWallet::SetupDescriptorScriptPubKeyMans(const CExtKey& master_key)
                 if (IsLocked()) {
                     throw std::runtime_error(std::string(__func__) + ": Wallet is locked, cannot setup new descriptors");
                 }
-                if (!spk_manager->CheckDecryptionKey(vMasterKey) && !spk_manager->Encrypt(vMasterKey, nullptr)) {
+                if (!spk_manager->CheckDecryptionKey(vMasterKey) && !spk_manager->Encrypt(vMasterKey, &batch)) {
                     throw std::runtime_error(std::string(__func__) + ": Could not encrypt new descriptors");
                 }
             }
-            spk_manager->SetupDescriptorGeneration(master_key, t, internal);
+            spk_manager->SetupDescriptorGeneration(batch, master_key, t, internal);
             uint256 id = spk_manager->GetID();
             AddScriptPubKeyMan(id, std::move(spk_manager));
-            AddActiveScriptPubKeyMan(id, t, internal);
+            AddActiveScriptPubKeyManWithDb(batch, id, t, internal);
         }
     }
+
+    // Ensure information is committed to disk
+    if (!batch.TxnCommit()) throw std::runtime_error("Error: cannot commit db transaction for descriptors setup");
 }
 
 void CWallet::SetupDescriptorScriptPubKeyMans()
@@ -3560,8 +3579,7 @@ void CWallet::SetupDescriptorScriptPubKeyMans()
 
     if (!IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER)) {
         // Make a seed
-        CKey seed_key;
-        seed_key.MakeNewKey(true);
+        CKey seed_key = GenerateRandomKey();
         CPubKey seed = seed_key.GetPubKey();
         assert(seed_key.VerifyPubKey(seed));
 
@@ -3578,6 +3596,10 @@ void CWallet::SetupDescriptorScriptPubKeyMans()
         UniValue signer_res = signer.GetDescriptors(account);
 
         if (!signer_res.isObject()) throw std::runtime_error(std::string(__func__) + ": Unexpected result");
+
+        WalletBatch batch(GetDatabase());
+        if (!batch.TxnBegin()) throw std::runtime_error("Error: cannot create db transaction for descriptors import");
+
         for (bool internal : {false, true}) {
             const UniValue& descriptor_vals = signer_res.find_value(internal ? "internal" : "receive");
             if (!descriptor_vals.isArray()) throw std::runtime_error(std::string(__func__) + ": Unexpected result");
@@ -3594,18 +3616,26 @@ void CWallet::SetupDescriptorScriptPubKeyMans()
                 }
                 OutputType t =  *desc->GetOutputType();
                 auto spk_manager = std::unique_ptr<ExternalSignerScriptPubKeyMan>(new ExternalSignerScriptPubKeyMan(*this, m_keypool_size));
-                spk_manager->SetupDescriptor(std::move(desc));
+                spk_manager->SetupDescriptor(batch, std::move(desc));
                 uint256 id = spk_manager->GetID();
                 AddScriptPubKeyMan(id, std::move(spk_manager));
-                AddActiveScriptPubKeyMan(id, t, internal);
+                AddActiveScriptPubKeyManWithDb(batch, id, t, internal);
             }
         }
+
+        // Ensure imported descriptors are committed to disk
+        if (!batch.TxnCommit()) throw std::runtime_error("Error: cannot commit db transaction for descriptors import");
     }
 }
 
 void CWallet::AddActiveScriptPubKeyMan(uint256 id, OutputType type, bool internal)
 {
     WalletBatch batch(GetDatabase());
+    return AddActiveScriptPubKeyManWithDb(batch, id, type, internal);
+}
+
+void CWallet::AddActiveScriptPubKeyManWithDb(WalletBatch& batch, uint256 id, OutputType type, bool internal)
+{
     if (!batch.WriteActiveScriptPubKeyMan(static_cast<uint8_t>(type), id, internal)) {
         throw std::runtime_error(std::string(__func__) + ": writing active ScriptPubKeyMan id failed");
     }
@@ -3960,12 +3990,8 @@ bool CWallet::ApplyMigrationData(MigrationData& data, bilingual_str& error)
                 if (data.watchonly_wallet) {
                     LOCK(data.watchonly_wallet->cs_wallet);
                     if (data.watchonly_wallet->IsMine(addr_pair.first)) {
-                        // Add to the watchonly. Preserve the labels, purpose, and change-ness
-                        std::string label = addr_pair.second.GetLabel();
-                        data.watchonly_wallet->m_address_book[addr_pair.first].purpose = addr_pair.second.purpose;
-                        if (!addr_pair.second.IsChange()) {
-                            data.watchonly_wallet->m_address_book[addr_pair.first].SetLabel(label);
-                        }
+                        // Add to the watchonly. Copy the entire address book entry
+                        data.watchonly_wallet->m_address_book[addr_pair.first] = addr_pair.second;
                         dests_to_delete.push_back(addr_pair.first);
                         continue;
                     }
@@ -3973,12 +3999,8 @@ bool CWallet::ApplyMigrationData(MigrationData& data, bilingual_str& error)
                 if (data.solvable_wallet) {
                     LOCK(data.solvable_wallet->cs_wallet);
                     if (data.solvable_wallet->IsMine(addr_pair.first)) {
-                        // Add to the solvable. Preserve the labels, purpose, and change-ness
-                        std::string label = addr_pair.second.GetLabel();
-                        data.solvable_wallet->m_address_book[addr_pair.first].purpose = addr_pair.second.purpose;
-                        if (!addr_pair.second.IsChange()) {
-                            data.solvable_wallet->m_address_book[addr_pair.first].SetLabel(label);
-                        }
+                        // Add to the solvable. Copy the entire address book entry
+                        data.solvable_wallet->m_address_book[addr_pair.first] = addr_pair.second;
                         dests_to_delete.push_back(addr_pair.first);
                         continue;
                     }
@@ -3998,21 +4020,13 @@ bool CWallet::ApplyMigrationData(MigrationData& data, bilingual_str& error)
             // Labels for everything else ("send") should be cloned to all
             if (data.watchonly_wallet) {
                 LOCK(data.watchonly_wallet->cs_wallet);
-                // Add to the watchonly. Preserve the labels, purpose, and change-ness
-                std::string label = addr_pair.second.GetLabel();
-                data.watchonly_wallet->m_address_book[addr_pair.first].purpose = addr_pair.second.purpose;
-                if (!addr_pair.second.IsChange()) {
-                    data.watchonly_wallet->m_address_book[addr_pair.first].SetLabel(label);
-                }
+                // Add to the watchonly. Copy the entire address book entry
+                data.watchonly_wallet->m_address_book[addr_pair.first] = addr_pair.second;
             }
             if (data.solvable_wallet) {
                 LOCK(data.solvable_wallet->cs_wallet);
-                // Add to the solvable. Preserve the labels, purpose, and change-ness
-                std::string label = addr_pair.second.GetLabel();
-                data.solvable_wallet->m_address_book[addr_pair.first].purpose = addr_pair.second.purpose;
-                if (!addr_pair.second.IsChange()) {
-                    data.solvable_wallet->m_address_book[addr_pair.first].SetLabel(label);
-                }
+                // Add to the solvable. Copy the entire address book entry
+                data.solvable_wallet->m_address_book[addr_pair.first] = addr_pair.second;
             }
         }
     }
@@ -4023,10 +4037,12 @@ bool CWallet::ApplyMigrationData(MigrationData& data, bilingual_str& error)
         WalletBatch batch{wallet.GetDatabase()};
         for (const auto& [destination, addr_book_data] : wallet.m_address_book) {
             auto address{EncodeDestination(destination)};
-            std::optional<std::string> label = addr_book_data.IsChange() ? std::nullopt : std::make_optional(addr_book_data.GetLabel());
-            // don't bother writing default values (unknown purpose)
             if (addr_book_data.purpose) batch.WritePurpose(address, PurposeToString(*addr_book_data.purpose));
-            if (label) batch.WriteName(address, *label);
+            if (addr_book_data.label) batch.WriteName(address, *addr_book_data.label);
+            for (const auto& [id, request] : addr_book_data.receive_requests) {
+                batch.WriteAddressReceiveRequest(destination, id, request);
+            }
+            if (addr_book_data.previously_spent) batch.WriteAddressPreviouslySpent(destination, true);
         }
     };
     if (data.watchonly_wallet) persist_address_book(*data.watchonly_wallet);

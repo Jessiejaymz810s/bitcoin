@@ -17,6 +17,7 @@ from collections import deque
 import configparser
 import datetime
 import os
+import platform
 import time
 import shutil
 import signal
@@ -42,8 +43,8 @@ except UnicodeDecodeError:
     CROSS = "x "
     CIRCLE = "o "
 
-if os.name != 'nt' or sys.getwindowsversion() >= (10, 0, 14393): #type:ignore
-    if os.name == 'nt':
+if platform.system() != 'Windows' or sys.getwindowsversion() >= (10, 0, 14393): #type:ignore
+    if platform.system() == 'Windows':
         import ctypes
         kernel32 = ctypes.windll.kernel32  # type: ignore
         ENABLE_VIRTUAL_TERMINAL_PROCESSING = 4
@@ -207,6 +208,8 @@ BASE_SCRIPTS = [
     'wallet_createwallet.py --descriptors',
     'wallet_watchonly.py --legacy-wallet',
     'wallet_watchonly.py --usecli --legacy-wallet',
+    'wallet_reindex.py --legacy-wallet',
+    'wallet_reindex.py --descriptors',
     'wallet_reorgsrestore.py',
     'wallet_conflicts.py --legacy-wallet',
     'wallet_conflicts.py --descriptors',
@@ -341,6 +344,7 @@ BASE_SCRIPTS = [
     'feature_filelock.py',
     'feature_loadblock.py',
     'feature_assumeutxo.py',
+    'wallet_assumeutxo.py --descriptors',
     'p2p_dos_header_tree.py',
     'p2p_add_connections.py',
     'feature_bind_port_discover.py',
@@ -565,8 +569,7 @@ def run_tests(*, test_list, src_dir, build_dir, tmpdir, jobs=1, enable_coverage=
         test_framework_tests.addTest(unittest.TestLoader().loadTestsFromName("test_framework.{}".format(module)))
     result = unittest.TextTestRunner(verbosity=1, failfast=True).run(test_framework_tests)
     if not result.wasSuccessful():
-        logging.debug("Early exiting after failure in TestFramework unit tests")
-        sys.exit(False)
+        sys.exit("Early exiting after failure in TestFramework unit tests")
 
     flags = ['--cachedir={}'.format(cache_dir)] + args
 

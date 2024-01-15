@@ -4,7 +4,7 @@ define(_CLIENT_VERSION_MINOR, 99)
 define(_CLIENT_VERSION_BUILD, 0)
 define(_CLIENT_VERSION_RC, 0)
 define(_CLIENT_VERSION_IS_RELEASE, false)
-define(_COPYRIGHT_YEAR, 2023)
+define(_COPYRIGHT_YEAR, 2024)
 define(_COPYRIGHT_HOLDERS,[The %s developers])
 define(_COPYRIGHT_HOLDERS_SUBSTITUTION,[[Bitcoin Core]])
 AC_INIT([Bitcoin Core],m4_join([.], _CLIENT_VERSION_MAJOR, _CLIENT_VERSION_MINOR, _CLIENT_VERSION_BUILD)m4_if(_CLIENT_VERSION_RC, [0], [], [rc]_CLIENT_VERSION_RC),[https://github.com/bitcoin/bitcoin/issues],[bitcoin],[https://bitcoincore.org/])
@@ -96,18 +96,8 @@ case $host in
   ;;
 esac
 
-AC_ARG_ENABLE([c++20],
-  [AS_HELP_STRING([--enable-c++20],
-  [enable compilation in c++20 mode (disabled by default)])],
-  [use_cxx20=$enableval],
-  [use_cxx20=no])
-
-dnl Require C++17 compiler (no GNU extensions)
-if test "$use_cxx20" = "no"; then
-AX_CXX_COMPILE_STDCXX([17], [noext], [mandatory])
-else
+dnl Require C++20 compiler (no GNU extensions)
 AX_CXX_COMPILE_STDCXX([20], [noext], [mandatory])
-fi
 
 dnl Unless the user specified OBJCXX, force it to be the same as CXX. This ensures
 dnl that we get the same -std flags for both.
@@ -446,8 +436,8 @@ if test "$CXXFLAGS_overridden" = "no"; then
   AX_CHECK_COMPILE_FLAG([-Wlogical-op], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wlogical-op"], [], [$CXXFLAG_WERROR])
   AX_CHECK_COMPILE_FLAG([-Woverloaded-virtual], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Woverloaded-virtual"], [], [$CXXFLAG_WERROR])
   AX_CHECK_COMPILE_FLAG([-Wsuggest-override], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wsuggest-override"], [], [$CXXFLAG_WERROR])
-  AX_CHECK_COMPILE_FLAG([-Wunreachable-code-loop-increment], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wunreachable-code-loop-increment"], [], [$CXXFLAG_WERROR])
   AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wimplicit-fallthrough"], [], [$CXXFLAG_WERROR])
+  AX_CHECK_COMPILE_FLAG([-Wunreachable-code], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wunreachable-code"], [], [$CXXFLAG_WERROR])
 
   if test "$suppress_external_warnings" != "no" ; then
     AX_CHECK_COMPILE_FLAG([-Wdocumentation], [WARN_CXXFLAGS="$WARN_CXXFLAGS -Wdocumentation"], [], [$CXXFLAG_WERROR])
@@ -750,7 +740,7 @@ case $host in
          dnl option to system-ify all /usr/local/include paths without adding it to the list
          dnl of search paths in case it's not already there.
          if test "$suppress_external_warnings" != "no"; then
-           AX_CHECK_PREPROC_FLAG([-Xclang -internal-isystem/usr/local/include], [CORE_CPPFLAGS="$CORE_CPPFLAGS -Xclang -internal-isystem/usr/local/include"], [], [$CXXFLAG_WERROR])
+           AX_CHECK_PREPROC_FLAG([-Xclang -internal-isystem -Xclang /usr/local/include/], [CORE_CPPFLAGS="$CORE_CPPFLAGS -Xclang -internal-isystem -Xclang /usr/local/include/"], [], [$CXXFLAG_WERROR])
          fi
 
          if test "$use_bdb" != "no" && $BREW list --versions berkeley-db@4 >/dev/null && test "$BDB_CFLAGS" = "" && test "$BDB_LIBS" = ""; then
@@ -1348,8 +1338,6 @@ if test "$enable_fuzz_binary" = "yes"; then
      ]],[[
       */ int not_main() {
      ]])])
-
-  CHECK_RUNTIME_LIB
 fi
 
 if test "$enable_wallet" != "no"; then
@@ -1464,7 +1452,7 @@ fi
 if test "$use_boost" = "yes"; then
 
   dnl Check for Boost headers
-  AX_BOOST_BASE([1.64.0],[],[AC_MSG_ERROR([Boost is not available!])])
+  AX_BOOST_BASE([1.73.0],[],[AC_MSG_ERROR([Boost is not available!])])
   if test "$want_boost" = "no"; then
     AC_MSG_ERROR([only libbitcoinconsensus can be built without Boost])
   fi
@@ -1515,9 +1503,19 @@ if test "$use_external_signer" != "no"; then
   CXXFLAGS="$TEMP_CXXFLAGS"
   AC_MSG_RESULT([$have_boost_process])
   if test "$have_boost_process" = "yes"; then
-    use_external_signer="yes"
-    AC_DEFINE([ENABLE_EXTERNAL_SIGNER], [1], [Define if external signer support is enabled])
-    AC_DEFINE([BOOST_PROCESS_USE_STD_FS], [1], [Defined to avoid Boost::Process trying to use Boost Filesystem])
+    case $host in
+      dnl Boost Process for Windows uses Boost ASIO. Boost ASIO performs
+      dnl pre-main init of Windows networking libraries, which we do not
+      dnl want.
+      *mingw*)
+        use_external_signer="no"
+      ;;
+      *)
+        use_external_signer="yes"
+        AC_DEFINE([ENABLE_EXTERNAL_SIGNER], [1], [Define if external signer support is enabled])
+        AC_DEFINE([BOOST_PROCESS_USE_STD_FS], [1], [Defined to avoid Boost::Process trying to use Boost Filesystem])
+      ;;
+    esac
   else
     if test "$use_external_signer" = "yes"; then
       AC_MSG_ERROR([External signing is not supported for this Boost version])

@@ -98,7 +98,7 @@ The following can be set when running make: `make FOO=bar`
 - `SDK_PATH`: Path where SDKs can be found (used by macOS)
 - `FALLBACK_DOWNLOAD_PATH`: If a source file can't be fetched, try here before giving up
 - `C_STANDARD`: Set the C standard version used. Defaults to `c11`.
-- `CXX_STANDARD`: Set the C++ standard version used. Defaults to `c++17`.
+- `CXX_STANDARD`: Set the C++ standard version used. Defaults to `c++20`.
 - `NO_BOOST`: Don't download/build/cache Boost
 - `NO_LIBEVENT`: Don't download/build/cache Libevent
 - `NO_QT`: Don't download/build/cache Qt and its dependencies
@@ -110,9 +110,6 @@ The following can be set when running make: `make FOO=bar`
 - `NO_UPNP`: Don't download/build/cache packages needed for enabling UPnP
 - `NO_NATPMP`: Don't download/build/cache packages needed for enabling NAT-PMP
 - `NO_USDT`: Don't download/build/cache packages needed for enabling USDT tracepoints
-- `ALLOW_HOST_PACKAGES`: Packages that are missed in dependencies (due to `NO_*` option or
-  build script logic) are searched for among the host system packages using
-  `pkg-config`. It allows building with packages of other (newer) versions
 - `MULTIPROCESS`: Build libmultiprocess (experimental, requires CMake)
 - `DEBUG`: Disable some optimizations and enable more runtime checking
 - `HOST_ID_SALT`: Optional salt to use when generating host package ids

@@ -264,7 +264,7 @@ static bool rest_headers(const std::any& context,
     case RESTResponseFormat::JSON: {
         UniValue jsonHeaders(UniValue::VARR);
         for (const CBlockIndex *pindex : headers) {
-            jsonHeaders.push_back(blockheaderToJSON(tip, pindex));
+            jsonHeaders.push_back(blockheaderToJSON(*tip, *pindex));
         }
         std::string strJSON = jsonHeaders.write() + "\n";
         req->WriteHeader("Content-Type", "application/json");
@@ -304,10 +304,9 @@ static bool rest_block(const std::any& context,
         if (!pblockindex) {
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not found");
         }
-
-        if (chainman.m_blockman.IsBlockPruned(pblockindex))
+        if (chainman.m_blockman.IsBlockPruned(*pblockindex)) {
             return RESTERR(req, HTTP_NOT_FOUND, hashStr + " not available (pruned data)");
-
+        }
     }
 
     if (!chainman.m_blockman.ReadBlockFromDisk(block, *pblockindex)) {
@@ -317,7 +316,7 @@ static bool rest_block(const std::any& context,
     switch (rf) {
     case RESTResponseFormat::BINARY: {
         DataStream ssBlock;
-        ssBlock << RPCTxSerParams(block);
+        ssBlock << TX_WITH_WITNESS(block);
         std::string binaryBlock = ssBlock.str();
         req->WriteHeader("Content-Type", "application/octet-stream");
         req->WriteReply(HTTP_OK, binaryBlock);
@@ -326,7 +325,7 @@ static bool rest_block(const std::any& context,
 
     case RESTResponseFormat::HEX: {
         DataStream ssBlock;
-        ssBlock << RPCTxSerParams(block);
+        ssBlock << TX_WITH_WITNESS(block);
         std::string strHex = HexStr(ssBlock) + "\n";
         req->WriteHeader("Content-Type", "text/plain");
         req->WriteReply(HTTP_OK, strHex);
@@ -334,7 +333,7 @@ static bool rest_block(const std::any& context,
     }
 
     case RESTResponseFormat::JSON: {
-        UniValue objBlock = blockToJSON(chainman.m_blockman, block, tip, pblockindex, tx_verbosity);
+        UniValue objBlock = blockToJSON(chainman.m_blockman, block, *tip, *pblockindex, tx_verbosity);
         std::string strJSON = objBlock.write() + "\n";
         req->WriteHeader("Content-Type", "application/json");
         req->WriteReply(HTTP_OK, strJSON);
@@ -723,7 +722,7 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
     switch (rf) {
     case RESTResponseFormat::BINARY: {
         DataStream ssTx;
-        ssTx << RPCTxSerParams(tx);
+        ssTx << TX_WITH_WITNESS(tx);
 
         std::string binaryTx = ssTx.str();
         req->WriteHeader("Content-Type", "application/octet-stream");
@@ -733,7 +732,7 @@ static bool rest_tx(const std::any& context, HTTPRequest* req, const std::string
 
     case RESTResponseFormat::HEX: {
         DataStream ssTx;
-        ssTx << RPCTxSerParams(tx);
+        ssTx << TX_WITH_WITNESS(tx);
 
         std::string strHex = HexStr(ssTx) + "\n";
         req->WriteHeader("Content-Type", "text/plain");

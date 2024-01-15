@@ -27,7 +27,6 @@
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
-#include <shutdown.h>
 #include <timedata.h>
 #include <txmempool.h>
 #include <univalue.h>
@@ -129,11 +128,11 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
     block_out.reset();
     block.hashMerkleRoot = BlockMerkleRoot(block);
 
-    while (max_tries > 0 && block.nNonce < std::numeric_limits<uint32_t>::max() && !CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus()) && !ShutdownRequested()) {
+    while (max_tries > 0 && block.nNonce < std::numeric_limits<uint32_t>::max() && !CheckProofOfWork(block.GetHash(), block.nBits, chainman.GetConsensus()) && !chainman.m_interrupt) {
         ++block.nNonce;
         --max_tries;
     }
-    if (max_tries == 0 || ShutdownRequested()) {
+    if (max_tries == 0 || chainman.m_interrupt) {
         return false;
     }
     if (block.nNonce == std::numeric_limits<uint32_t>::max()) {
@@ -154,7 +153,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
 static UniValue generateBlocks(ChainstateManager& chainman, const CTxMemPool& mempool, const CScript& coinbase_script, int nGenerate, uint64_t nMaxTries)
 {
     UniValue blockHashes(UniValue::VARR);
-    while (nGenerate > 0 && !ShutdownRequested()) {
+    while (nGenerate > 0 && !chainman.m_interrupt) {
         std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler{chainman.ActiveChainstate(), &mempool}.CreateNewBlock(coinbase_script));
         if (!pblocktemplate.get())
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
@@ -400,7 +399,7 @@ static RPCHelpMan generateblock()
     obj.pushKV("hash", block_out->GetHash().GetHex());
     if (!process_new_block) {
         DataStream block_ser;
-        block_ser << RPCTxSerParams(*block_out);
+        block_ser << TX_WITH_WITNESS(*block_out);
         obj.pushKV("hex", HexStr(block_ser));
     }
     return obj;
@@ -441,7 +440,7 @@ static RPCHelpMan getmininginfo()
     obj.pushKV("blocks",           active_chain.Height());
     if (BlockAssembler::m_last_block_weight) obj.pushKV("currentblockweight", *BlockAssembler::m_last_block_weight);
     if (BlockAssembler::m_last_block_num_txs) obj.pushKV("currentblocktx", *BlockAssembler::m_last_block_num_txs);
-    obj.pushKV("difficulty",       (double)GetDifficulty(active_chain.Tip()));
+    obj.pushKV("difficulty", GetDifficulty(*CHECK_NONFATAL(active_chain.Tip())));
     obj.pushKV("networkhashps",    getnetworkhashps().HandleRequest(request));
     obj.pushKV("pooledtx",         (uint64_t)mempool.size());
     obj.pushKV("chain", chainman.GetParams().GetChainTypeString());
@@ -496,11 +495,12 @@ static RPCHelpMan getprioritisedtransactions()
         "Returns a map of all user-created (see prioritisetransaction) fee deltas by txid, and whether the tx is present in mempool.",
         {},
         RPCResult{
-            RPCResult::Type::OBJ_DYN, "prioritisation-map", "prioritisation keyed by txid",
+            RPCResult::Type::OBJ_DYN, "", "prioritisation keyed by txid",
             {
-                {RPCResult::Type::OBJ, "txid", "", {
+                {RPCResult::Type::OBJ, "<transactionid>", "", {
                     {RPCResult::Type::NUM, "fee_delta", "transaction fee delta in satoshis"},
                     {RPCResult::Type::BOOL, "in_mempool", "whether this transaction is currently in mempool"},
+                    {RPCResult::Type::NUM, "modified_fee", /*optional=*/true, "modified fee in satoshis. Only returned if in_mempool=true"},
                 }}
             },
         },
@@ -517,6 +517,9 @@ static RPCHelpMan getprioritisedtransactions()
                 UniValue result_inner{UniValue::VOBJ};
                 result_inner.pushKV("fee_delta", delta_info.delta);
                 result_inner.pushKV("in_mempool", delta_info.in_mempool);
+                if (delta_info.in_mempool) {
+                    result_inner.pushKV("modified_fee", *delta_info.modified_fee);
+                }
                 rpc_result.pushKV(delta_info.txid.GetHex(), result_inner);
             }
             return rpc_result;

@@ -1401,13 +1401,13 @@ bool WalletBatch::EraseRecords(const std::unordered_set<std::string>& types)
         }
 
         // Make a copy of key to avoid data being deleted by the following read of the type
-        Span key_data{key};
+        const SerializeData key_data{key.begin(), key.end()};
 
         std::string type;
         key >> type;
 
         if (types.count(type) > 0) {
-            if (!m_batch->Erase(key_data)) {
+            if (!m_batch->Erase(Span{key_data})) {
                 cursor.reset(nullptr);
                 m_batch->TxnAbort();
                 return false; // erase failed
@@ -1499,17 +1499,19 @@ std::unique_ptr<WalletDatabase> MakeDatabase(const fs::path& path, const Databas
     if (format == DatabaseFormat::SQLITE) {
 #ifdef USE_SQLITE
         return MakeSQLiteDatabase(path, options, status, error);
-#endif
+#else
         error = Untranslated(strprintf("Failed to open database path '%s'. Build does not support SQLite database format.", fs::PathToString(path)));
         status = DatabaseStatus::FAILED_BAD_FORMAT;
         return nullptr;
+#endif
     }
 
 #ifdef USE_BDB
     return MakeBerkeleyDatabase(path, options, status, error);
-#endif
+#else
     error = Untranslated(strprintf("Failed to open database path '%s'. Build does not support Berkeley DB database format.", fs::PathToString(path)));
     status = DatabaseStatus::FAILED_BAD_FORMAT;
     return nullptr;
+#endif
 }
 } // namespace wallet
